@@ -108,7 +108,7 @@ int main()
 		image_path += std::string(x_str);
 		strcpy(path_cstr, image_path.c_str());
 		if (read_to_array(path_cstr, x_test, &y_test) == 0){
-			conv2d(x_test, probs);
+			small_cnn(x_test, probs);
 			// convGolden(x_test, probs);
             // omitting softmax
 			int y_pred = max_likelihood(probs);

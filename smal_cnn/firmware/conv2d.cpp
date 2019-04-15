@@ -21,55 +21,58 @@
 //     }
 // }
 
-void flatten_and_relu(data_t out[OChan * OSize * OSize], data_t out_lcl[OChan][OSize * OSize])
+void flatten_and_relu(data_t out[OChan * OHeight * OWidth], data_t out_lcl[OChan][OHeight * OWidth])
 {
-#pragma HLS INLINE
+#pragma HLS pipeline
     // Calculate each work_item's result update location
-    static int stride = OSize * OSize;
+    static int stride = OHeight * OWidth;
 // Work_item updates output filter/image in DDR
 writeOut:
     for (int o = 0; o < OChan; o++)
     {
-        for (int itr = 0; itr < OSize * OSize; itr++)
+//#pragma HLS PIPELINE
+        for (int itr = 0; itr < OHeight * OWidth; itr++)
         {
-#pragma HLS PIPELINE II = 1
-            if (out_lcl[o][itr] > 0)
-                out[itr + o*stride] = out_lcl[o][itr];
+//#pragma HLS PIPELINE II = 1
+#pragma HLS dependence variable=out inter false
+        	data_t temp = out_lcl[o][itr];
+            if (temp > 0)
+                out[itr + o*stride] = temp;
             else
                 out[itr + o*stride] = 0;
         }
     }
 }
 
-void convolution_operation(data_t img_lcl[IChan][ISize * ISize], data_t wgt_lcl[IChan][WSize * WSize], data_t out_lcl[OSize * OSize], int y, int x)
+void convolution_operation(data_t img_lcl[IChan][IHeight * IWidth], data_t wgt_lcl[IChan][WWidth * WHeight], data_t out_lcl[OHeight * OWidth], int y, int x)
 {
-//#pragma HLS INLINE
+#pragma HLS PIPELINE
     // Holds temporary accumulator values
-    data_t acc[IChan][WSize][WSize];
+    data_t acc[IChan][WHeight][WWidth];
 #pragma HLS ARRAY_PARTITION variable = acc complete dim = 1
 
     // Holds Image Padding Boundary Check Variables
-    int xVal_base = x * Stride - Padding;
-    int yVal = y * Stride - Padding;
+    int xVal_base = x * WStride - Padding;
+    int yVal = y * HStride - Padding;
 
 // Runs over filter window
 convYaxis:
-    for (int i = 0; i < WSize; i++, yVal++)
+    for (int i = 0; i < WHeight; i++, yVal++)
     {
     // Runs over filter window
     convXaxis:
-        for (int j = 0, xVal = xVal_base; j < WSize; j++, xVal++)
+        for (int j = 0, xVal = xVal_base; j < WWidth; j++, xVal++)
         {
-#pragma HLS PIPELINE II = 1
+//#pragma HLS PIPELINE II = 1
         // Runs over each of the input channels
         convInchan:
             for (int input = 0; input < IChan; input++)
             {
                 // Convolution operation
-                if (yVal >= 0 && yVal < ISize && xVal >= 0 && xVal < ISize)
+                if (yVal >= 0 && yVal < IHeight && xVal >= 0 && xVal < IWidth)
                 {
-                    acc[input][i][j] = img_lcl[input][yVal * ISize + xVal] *
-                                       wgt_lcl[input][i * WSize + j];
+                    acc[input][i][j] = img_lcl[input][yVal * IWidth + xVal] *
+                                       wgt_lcl[input][i * WWidth + j];
                 }
                 else
                 {
@@ -81,10 +84,10 @@ convYaxis:
     // Summation of temporary accumulator buffer
     data_t sum = 0;
 accJ:
-    for (int j = 0; j < WSize; j++)
+    for (int j = 0; j < WHeight; j++)
     {
     accK:
-        for (int k = 0; k < WSize; k++)
+        for (int k = 0; k < WWidth; k++)
         {
 #pragma HLS PIPELINE II = 1
         accI:
@@ -95,64 +98,73 @@ accJ:
         }
     }
     // Update output pixel
-    out_lcl[y * OSize + x] = sum;
+    out_lcl[y * OWidth + x] = sum;
 }
 
-void conv2d(
-    data_t image[IChan * ISize * ISize], // Read-Only Image
+void conv_1chan(data_t img_lcl[IChan][IHeight * IWidth], data_t w_conv_o[IChan][WHeight*WWidth], data_t out_lcl_o[OHeight*OWidth])
+{
+    outYaxis:
+        for (int y = 0; y < OHeight; y++)
+        {
+        outXaxis:
+            for (int x = 0; x < OWidth; x++)
+            {
+                // Perform convolution for the current 'pixel'
+                convolution_operation(img_lcl, w_conv_o, out_lcl_o, y, x);
+            }
+        }
+}
+
+void small_cnn(
+    data_t image[IChan * IHeight * IWidth], // Read-Only Image
     data_t classes[10]                   // testing with MNIST
 )
 {
 //#pragma HLS interface axis port = image,classes
-    // computes one channel only
+
+#pragma HLS ARRAY_PARTITION variable = w_conv complete dim=1
+#pragma HLS ARRAY_PARTITION variable=b_conv complete
 
     // Local Buffer to Hold Input Image
-    data_t img_lcl[IChan][ISize * ISize];
-#pragma HLS ARRAY_PARTITION variable = img_lcl complete dim = 1
+    data_t img_lcl[OChan][IChan][IHeight * IWidth];
+#pragma HLS ARRAY_PARTITION variable = img_lcl complete
 
     // Local Buffer to Hold Output Filters/Images
-    data_t out_lcl[OChan][OSize * OSize];
-#pragma HLS ARRAY_PARTITION variable=out_lcl complete dim=1
-
+    data_t out_lcl[OChan][OHeight * OWidth];
+#pragma HLS ARRAY_PARTITION variable=out_lcl complete
+//#pragma HLS ARRAY_PARTITION variable=out_lcl factor=13 dim=2
 // Burst Read Image
 readImg:
-    for (int itr = 0, i = 0, j = 0; itr < IChan * ISize * ISize; itr++, j++)
+    for (int itr = 0, i = 0, j = 0; itr < IChan * IHeight * IWidth; itr++, j++)
     {
 #pragma HLS PIPELINE II = 1
-        if (j == ISize * ISize)
+        if (j == IHeight * IWidth)
         {
             j = 0;
             i++;
         }
-        img_lcl[i][j] = image[itr];
+        img_lcl[0][i][j] = image[itr];
+        img_lcl[1][i][j] = image[itr];
+        img_lcl[2][i][j] = image[itr];
+        img_lcl[3][i][j] = image[itr];
     }
 
 outChans:
     for (int o = 0; o < OChan; o++)
     {
 #pragma HLS unroll
-    outYaxis:
-        for (int y = 0; y < OSize; y++)
-        {
-#pragma HLS unroll
-        outXaxis:
-            for (int x = 0; x < OSize; x++)
-            {
-                // Perform convolution for the current 'pixel'
-                convolution_operation(img_lcl, w_conv[o], out_lcl[o], y, x);
-            }
-        }
+    	// copy_weights
+    	// must use function for unroll to take effect
+    	conv_1chan(img_lcl[o], w_conv[o], out_lcl[o]);
     }
-    data_t out[OChan * OSize * OSize]; // Output Filters/Images
+
+    data_t out[OChan * OHeight * OWidth]; // Output Filters/Images
+#pragma HLS ARRAY_PARTITION variable = out cyclic factor=4
     flatten_and_relu(out, out_lcl);
 
     data_t res0[32]; // Output Filters/Images
 #pragma HLS ARRAY_PARTITION variable = res0 complete dim = 1
 
-    for (int i =0; i<OChan*OSize*OSize; i++){
-        if(out[i] < 0)
-            out[i] = 0;
-    }    
     nn::fc<data_t, data_t, fc0>(w_fc0, out, b_fc0,res0); 
 
     // relu
